@@ -1,18 +1,27 @@
 /**
  * An implementation of rfc6749#section-4.1 and rfc7636.
+ * Copied from https://github.com/BitySA/oauth2-auth-code-pkce and modified to:
+ *
+ * include rememberSession feature. If this is false, then we only save state
+ * to sessionStorage and we don't save any refresh tokens, otherwise refresh
+ * token and state saved to localStorage which creates long lasting login.
+ *
+ * this can be set as a default by the app, then override by the user choice.
  */
-
 export interface Configuration {
   authorizationUrl: URL;
   clientId: string;
   explicitlyExposedTokens?: string[];
-  onAccessTokenExpiry: (refreshAccessToken: () => Promise<AccessContext>) => Promise<AccessContext>;
+  onAccessTokenExpiry: (
+    refreshAccessToken: () => Promise<AccessContext>
+  ) => Promise<AccessContext>;
   onInvalidGrant: (refreshAuthCodeOrRefreshToken: () => Promise<void>) => void;
   redirectUrl: URL;
   scopes: string[];
   tokenUrl: URL;
   extraAuthorizationParams?: ObjStringDict;
   extraRefreshParams?: ObjStringDict;
+  rememberSession?: boolean;
 }
 
 export interface PKCECodes {
@@ -31,16 +40,17 @@ export interface State {
   refreshToken?: RefreshToken;
   stateQueryParam?: string;
   scopes?: string[];
+  rememberSession?: boolean;
 }
 
 export interface RefreshToken {
   value: string;
-};
+}
 
 export interface AccessToken {
   value: string;
   expiry: string;
-};
+}
 
 export type Scopes = string[];
 
@@ -49,49 +59,50 @@ export interface AccessContext {
   explicitlyExposedTokens?: ObjStringDict;
   scopes?: Scopes;
   refreshToken?: RefreshToken;
-};
+  rememberSession?: boolean;
+}
 
 export type ObjStringDict = { [_: string]: string };
-export type HttpClient = ((...args: any[]) => Promise<any>);
+export type HttpClient = (...args: any[]) => Promise<any>;
 export type URL = string;
 
 /**
  * A list of OAuth2AuthCodePKCE errors.
  */
 // To "namespace" all errors.
-export class ErrorOAuth2 { }
+export class ErrorOAuth2 {}
 
 // For really unknown errors.
-export class ErrorUnknown extends ErrorOAuth2 { }
+export class ErrorUnknown extends ErrorOAuth2 {}
 
 // Some generic, internal errors that can happen.
-export class ErrorNoAuthCode extends ErrorOAuth2 { }
-export class ErrorInvalidReturnedStateParam extends ErrorOAuth2 { }
-export class ErrorInvalidJson extends ErrorOAuth2 { }
+export class ErrorNoAuthCode extends ErrorOAuth2 {}
+export class ErrorInvalidReturnedStateParam extends ErrorOAuth2 {}
+export class ErrorInvalidJson extends ErrorOAuth2 {}
 
 // Errors that occur across many endpoints
-export class ErrorInvalidScope extends ErrorOAuth2 { }
-export class ErrorInvalidRequest extends ErrorOAuth2 { }
-export class ErrorInvalidToken extends ErrorOAuth2 { }
+export class ErrorInvalidScope extends ErrorOAuth2 {}
+export class ErrorInvalidRequest extends ErrorOAuth2 {}
+export class ErrorInvalidToken extends ErrorOAuth2 {}
 
 /**
  * Possible authorization grant errors given by the redirection from the
  * authorization server.
  */
-export class ErrorAuthenticationGrant extends ErrorOAuth2 { }
-export class ErrorUnauthorizedClient extends ErrorAuthenticationGrant { }
-export class ErrorAccessDenied extends ErrorAuthenticationGrant { }
-export class ErrorUnsupportedResponseType extends ErrorAuthenticationGrant { }
-export class ErrorServerError extends ErrorAuthenticationGrant { }
-export class ErrorTemporarilyUnavailable extends ErrorAuthenticationGrant { }
+export class ErrorAuthenticationGrant extends ErrorOAuth2 {}
+export class ErrorUnauthorizedClient extends ErrorAuthenticationGrant {}
+export class ErrorAccessDenied extends ErrorAuthenticationGrant {}
+export class ErrorUnsupportedResponseType extends ErrorAuthenticationGrant {}
+export class ErrorServerError extends ErrorAuthenticationGrant {}
+export class ErrorTemporarilyUnavailable extends ErrorAuthenticationGrant {}
 
 /**
  * A list of possible access token response errors.
  */
-export class ErrorAccessTokenResponse extends ErrorOAuth2 { }
-export class ErrorInvalidClient extends ErrorAccessTokenResponse { }
-export class ErrorInvalidGrant extends ErrorAccessTokenResponse { }
-export class ErrorUnsupportedGrantType extends ErrorAccessTokenResponse { }
+export class ErrorAccessTokenResponse extends ErrorOAuth2 {}
+export class ErrorInvalidClient extends ErrorAccessTokenResponse {}
+export class ErrorInvalidGrant extends ErrorAccessTokenResponse {}
+export class ErrorUnsupportedGrantType extends ErrorAccessTokenResponse {}
 
 /**
  * WWW-Authenticate error object structure for less error prone handling.
@@ -124,7 +135,7 @@ export function toErrorClass(rawError: string): ErrorOAuth2 {
 }
 
 /**
- * A convience function to turn, for example, `Bearer realm="bity.com", 
+ * A convience function to turn, for example, `Bearer realm="bity.com",
  * error="invalid_client"` into `{ realm: "bity.com", error: "invalid_client"
  * }`.
  */
@@ -133,10 +144,13 @@ export function fromWWWAuthenticateHeaderStringToObject(
 ): ErrorWWWAuthenticate {
   const obj = a
     .slice("Bearer ".length)
-    .replace(/"/g, '')
-    .split(', ')
-    .map(tokens => { const [k,v] = tokens.split('='); return {[k]:v}; })
-    .reduce((a, c) => ({ ...a, ...c}), {});
+    .replace(/"/g, "")
+    .split(", ")
+    .map((tokens) => {
+      const [k, v] = tokens.split("=");
+      return { [k]: v };
+    })
+    .reduce((a, c) => ({ ...a, ...c }), {});
 
   return { realm: obj.realm, error: obj.error };
 }
@@ -145,13 +159,13 @@ export function fromWWWAuthenticateHeaderStringToObject(
  * HTTP headers that we need to access.
  */
 const HEADER_AUTHORIZATION = "Authorization";
-const HEADER_WWW_AUTHENTICATE= "WWW-Authenticate";
+const HEADER_WWW_AUTHENTICATE = "WWW-Authenticate";
 
 /**
  * To store the OAuth client's data between websites due to redirection.
  */
-export const LOCALSTORAGE_ID = `oauth2authcodepkce`;
-export const LOCALSTORAGE_STATE = `${LOCALSTORAGE_ID}-state`;
+export const STORAGE_ID = `oauth2authcodepkce`;
+export const STORAGE_STATE = `${STORAGE_ID}-state`;
 
 /**
  * The maximum length for a code verifier for the best security we can offer.
@@ -170,7 +184,8 @@ export const RECOMMENDED_STATE_LENGTH = 32;
 /**
  * Character set to generate code verifier defined in rfc7636.
  */
-const PKCE_CHARSET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+const PKCE_CHARSET =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
 
 /**
  * OAuth 2.0 client that ONLY supports authorization code flow, with PKCE.
@@ -185,12 +200,22 @@ const PKCE_CHARSET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012345
  */
 export class OAuth2AuthCodePKCE {
   private config!: Configuration;
+  private storage: Storage = window.sessionStorage;
   private state: State = {};
   private authCodeForAccessTokenRequest?: Promise<AccessContext>;
 
   constructor(config: Configuration) {
     this.config = config;
     this.recoverState();
+
+    if (!("rememberSession" in this.state)) {
+      this.state.rememberSession = this.config.rememberSession;
+    }
+    if (this.state.rememberSession) {
+      this.storage = window.localStorage;
+    } else {
+      this.storage = window.localStorage;
+    }
     return this;
   }
 
@@ -205,8 +230,7 @@ export class OAuth2AuthCodePKCE {
         return fetch(url, config, ...rest);
       }
 
-      return this
-        .getAccessToken()
+      return this.getAccessToken()
         .then(({ token }: AccessContext) => {
           const configNew: any = Object.assign({}, config);
           if (!configNew.headers) {
@@ -232,8 +256,9 @@ export class OAuth2AuthCodePKCE {
           );
 
           if (error instanceof ErrorInvalidToken) {
-            this.config
-              .onAccessTokenExpiry(() => this.exchangeRefreshTokenForAccessToken());
+            this.config.onAccessTokenExpiry(() =>
+              this.exchangeRefreshTokenForAccessToken()
+            );
           }
 
           return Promise.reject(error);
@@ -247,27 +272,35 @@ export class OAuth2AuthCodePKCE {
    * [fetchAuthorizationCode].
    */
   public isReturningFromAuthServer(): Promise<boolean> {
-    const error = OAuth2AuthCodePKCE.extractParamFromUrl(location.href, 'error');
+    const error = OAuth2AuthCodePKCE.extractParamFromUrl(
+      location.href,
+      "error"
+    );
     if (error) {
       return Promise.reject(toErrorClass(error));
     }
 
-    const code = OAuth2AuthCodePKCE.extractParamFromUrl(location.href, 'code');
+    const code = OAuth2AuthCodePKCE.extractParamFromUrl(location.href, "code");
     if (!code) {
       return Promise.resolve(false);
     }
 
-    const state = JSON.parse(localStorage.getItem(LOCALSTORAGE_STATE) || '{}');
+    const state = JSON.parse(this.storage.getItem(STORAGE_STATE) || "{}");
 
-    const stateQueryParam = OAuth2AuthCodePKCE.extractParamFromUrl(location.href, 'state');
+    const stateQueryParam = OAuth2AuthCodePKCE.extractParamFromUrl(
+      location.href,
+      "state"
+    );
     if (stateQueryParam !== state.stateQueryParam) {
-      console.warn("state query string parameter doesn't match the one sent! Possible malicious activity somewhere.");
+      console.warn(
+        "state query string parameter doesn't match the one sent! Possible malicious activity somewhere."
+      );
       return Promise.reject(new ErrorInvalidReturnedStateParam());
     }
 
     state.authorizationCode = code;
     state.hasAuthCodeBeenExchangedForAccessToken = false;
-    localStorage.setItem(LOCALSTORAGE_STATE, JSON.stringify(state));
+    this.storage.setItem(STORAGE_STATE, JSON.stringify(state));
 
     this.setState(state);
     return Promise.resolve(true);
@@ -281,41 +314,52 @@ export class OAuth2AuthCodePKCE {
    * parameters during the authorization code fetching process, usually for
    * values which need to change at run-time.
    */
-  public async fetchAuthorizationCode(oneTimeParams?: ObjStringDict): Promise<void> {
+  public async fetchAuthorizationCode(
+    oneTimeParams?: ObjStringDict
+  ): Promise<void> {
     this.assertStateAndConfigArePresent();
 
-    const { clientId, extraAuthorizationParams, redirectUrl, scopes } = this.config;
-    const { codeChallenge, codeVerifier } = await OAuth2AuthCodePKCE
-      .generatePKCECodes();
-    const stateQueryParam = OAuth2AuthCodePKCE
-      .generateRandomState(RECOMMENDED_STATE_LENGTH);
+    const {
+      clientId,
+      extraAuthorizationParams,
+      redirectUrl,
+      scopes,
+    } = this.config;
+    const {
+      codeChallenge,
+      codeVerifier,
+    } = await OAuth2AuthCodePKCE.generatePKCECodes();
+    const stateQueryParam = OAuth2AuthCodePKCE.generateRandomState(
+      RECOMMENDED_STATE_LENGTH
+    );
 
     this.state = {
-      ...this.state, 
+      ...this.state,
       codeChallenge,
       codeVerifier,
       stateQueryParam,
-      isHTTPDecoratorActive: true
+      isHTTPDecoratorActive: true,
     };
 
-    localStorage.setItem(LOCALSTORAGE_STATE, JSON.stringify(this.state));
+    this.storage.setItem(STORAGE_STATE, JSON.stringify(this.state));
 
-    let url = this.config.authorizationUrl
-      + `?response_type=code&`
-      + `client_id=${encodeURIComponent(clientId)}&`
-      + `redirect_uri=${encodeURIComponent(redirectUrl)}&`
-      + `scope=${encodeURIComponent(scopes.join(' '))}&`
-      + `state=${stateQueryParam}&`
-      + `code_challenge=${encodeURIComponent(codeChallenge)}&`
-      + `code_challenge_method=S256`;
+    let url =
+      this.config.authorizationUrl +
+      `?response_type=code&` +
+      `client_id=${encodeURIComponent(clientId)}&` +
+      `redirect_uri=${encodeURIComponent(redirectUrl)}&` +
+      `scope=${encodeURIComponent(scopes.join(" "))}&` +
+      `state=${stateQueryParam}&` +
+      `code_challenge=${encodeURIComponent(codeChallenge)}&` +
+      `code_challenge_method=S256`;
 
     if (extraAuthorizationParams || oneTimeParams) {
       const extraParameters: ObjStringDict = {
         ...extraAuthorizationParams,
-        ...oneTimeParams
+        ...oneTimeParams,
       };
 
-      url = `${url}&${OAuth2AuthCodePKCE.objectToQueryString(extraParameters)}`
+      url = `${url}&${OAuth2AuthCodePKCE.objectToQueryString(extraParameters)}`;
     }
 
     location.replace(url);
@@ -338,7 +382,8 @@ export class OAuth2AuthCodePKCE {
       explicitlyExposedTokens,
       hasAuthCodeBeenExchangedForAccessToken,
       refreshToken,
-      scopes
+      scopes,
+      rememberSession,
     } = this.state;
 
     if (!authorizationCode) {
@@ -356,14 +401,17 @@ export class OAuth2AuthCodePKCE {
 
     // Depending on the server (and config), refreshToken may not be available.
     if (refreshToken && this.isAccessTokenExpired()) {
-      return onAccessTokenExpiry(() => this.exchangeRefreshTokenForAccessToken());
+      return onAccessTokenExpiry(() =>
+        this.exchangeRefreshTokenForAccessToken()
+      );
     }
 
     return Promise.resolve({
       token: accessToken,
       explicitlyExposedTokens,
       scopes,
-      refreshToken
+      refreshToken,
+      rememberSession,
     });
   }
 
@@ -377,81 +425,98 @@ export class OAuth2AuthCodePKCE {
     const { refreshToken } = this.state;
 
     if (!refreshToken) {
-      console.warn('No refresh token is present.');
+      console.warn("No refresh token is present.");
     }
 
     const url = tokenUrl;
-    let body = `grant_type=refresh_token&`
-      + `refresh_token=${refreshToken?.value}&`
-      + `client_id=${clientId}`;
+    let body =
+      `grant_type=refresh_token&` +
+      `refresh_token=${refreshToken?.value}&` +
+      `client_id=${clientId}`;
 
     if (extraRefreshParams) {
-      body = `${url}&${OAuth2AuthCodePKCE.objectToQueryString(extraRefreshParams)}`
+      body = `${url}&${OAuth2AuthCodePKCE.objectToQueryString(
+        extraRefreshParams
+      )}`;
     }
 
     return fetch(url, {
-      method: 'POST',
+      method: "POST",
       body,
       headers: {
-        'Content-Type': 'application/x-www-form-urlencoded'
-      }
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
     })
-    .then(res => res.status >= 400 ? res.json().then(data => Promise.reject(data)) : res.json())
-    .then((json) => {
-      const { access_token, expires_in, refresh_token, scope } = json;
-      const { explicitlyExposedTokens } = this.config;
-      let scopes = [];
-      let tokensToExpose = {};
+      .then((res) =>
+        res.status >= 400
+          ? res.json().then((data) => Promise.reject(data))
+          : res.json()
+      )
+      .then((json) => {
+        const { access_token, expires_in, refresh_token, scope } = json;
+        const { explicitlyExposedTokens } = this.config;
+        let scopes = [];
+        let tokensToExpose = {};
 
-      const accessToken: AccessToken = {
-        value: access_token,
-        expiry: (new Date(Date.now() + (parseInt(expires_in) * 1000))).toString()
-      };
-      this.state.accessToken = accessToken;
-
-      if (refresh_token) {
-        const refreshToken: RefreshToken = {
-          value: refresh_token
+        const accessToken: AccessToken = {
+          value: access_token,
+          expiry: new Date(Date.now() + parseInt(expires_in) * 1000).toString(),
         };
-        this.state.refreshToken = refreshToken;
-      }
+        this.state.accessToken = accessToken;
 
-      if (explicitlyExposedTokens) {
-        tokensToExpose = Object.fromEntries(
-          explicitlyExposedTokens
-            .map((tokenName: string): [string, string|undefined] => [tokenName, json[tokenName]])
-            .filter(([_, tokenValue]: [string, string|undefined]) => tokenValue !== undefined)
-        );
-        this.state.explicitlyExposedTokens = tokensToExpose;
-      }
+        if (refresh_token) {
+          const refreshToken: RefreshToken = {
+            value: refresh_token,
+          };
+          this.state.refreshToken = refreshToken;
+        }
 
-      if (scope) {
-        // Multiple scopes are passed and delimited by spaces,
-        // despite using the singular name "scope".
-        scopes = scope.split(' ');
-        this.state.scopes = scopes;
-      }
+        if (explicitlyExposedTokens) {
+          tokensToExpose = Object.fromEntries(
+            explicitlyExposedTokens
+              .map((tokenName: string): [string, string | undefined] => [
+                tokenName,
+                json[tokenName],
+              ])
+              .filter(
+                ([_, tokenValue]: [string, string | undefined]) =>
+                  tokenValue !== undefined
+              )
+          );
+          this.state.explicitlyExposedTokens = tokensToExpose;
+        }
 
-      localStorage.setItem(LOCALSTORAGE_STATE, JSON.stringify(this.state));
+        if (scope) {
+          // Multiple scopes are passed and delimited by spaces,
+          // despite using the singular name "scope".
+          scopes = scope.split(" ");
+          this.state.scopes = scopes;
+        }
 
-      let accessContext: AccessContext = {token: accessToken, scopes};
-      if (explicitlyExposedTokens) {
-        accessContext.explicitlyExposedTokens = tokensToExpose;
-      }
-      return accessContext;
-    })
-    .catch(data => {
-      const { onInvalidGrant } = this.config;
-      const error = data.error || 'There was a network error.';
-      switch (error) {
-        case 'invalid_grant':
-          onInvalidGrant(() => this.fetchAuthorizationCode());
-          break;
-        default:
-          break;
-      }
-      return Promise.reject(toErrorClass(error));
-    });
+        this.storage.setItem(STORAGE_STATE, JSON.stringify(this.state));
+
+        let accessContext: AccessContext = {
+          token: accessToken,
+          scopes,
+          rememberSession: this.state.rememberSession,
+        };
+        if (explicitlyExposedTokens) {
+          accessContext.explicitlyExposedTokens = tokensToExpose;
+        }
+        return accessContext;
+      })
+      .catch((data) => {
+        const { onInvalidGrant } = this.config;
+        const error = data.error || "There was a network error.";
+        switch (error) {
+          case "invalid_grant":
+            onInvalidGrant(() => this.fetchAuthorizationCode());
+            break;
+          default:
+            break;
+        }
+        return Promise.reject(toErrorClass(error));
+      });
   }
 
   /**
@@ -466,7 +531,7 @@ export class OAuth2AuthCodePKCE {
    */
   public isHTTPDecoratorActive(isActive: boolean) {
     this.state.isHTTPDecoratorActive = isActive;
-    localStorage.setItem(LOCALSTORAGE_STATE, JSON.stringify(this.state));
+    this.storage.setItem(STORAGE_STATE, JSON.stringify(this.state));
   }
 
   /**
@@ -483,7 +548,7 @@ export class OAuth2AuthCodePKCE {
    */
   public isAccessTokenExpired(): boolean {
     const { accessToken } = this.state;
-    return Boolean(accessToken && (new Date()) >= (new Date(accessToken.expiry)));
+    return Boolean(accessToken && new Date() >= new Date(accessToken.expiry));
   }
 
   /**
@@ -500,8 +565,8 @@ export class OAuth2AuthCodePKCE {
    */
   private assertStateAndConfigArePresent() {
     if (!this.state || !this.config) {
-      console.error('state:', this.state, 'config:', this.config);
-      throw new Error('state or config is not set.');
+      console.error("state:", this.state, "config:", this.config);
+      throw new Error("state or config is not set.");
     }
   }
 
@@ -514,40 +579,36 @@ export class OAuth2AuthCodePKCE {
   ): Promise<AccessContext> {
     this.assertStateAndConfigArePresent();
 
-    const {
-      authorizationCode = codeOverride,
-      codeVerifier = ''
-    } = this.state;
+    const { authorizationCode = codeOverride, codeVerifier = "" } = this.state;
     const { clientId, onInvalidGrant, redirectUrl } = this.config;
 
     if (!codeVerifier) {
-      console.warn('No code verifier is being sent.');
+      console.warn("No code verifier is being sent.");
     } else if (!authorizationCode) {
-      console.warn('No authorization grant code is being passed.');
+      console.warn("No authorization grant code is being passed.");
     }
 
     const url = this.config.tokenUrl;
-    const body = `grant_type=authorization_code&`
-      + `code=${encodeURIComponent(authorizationCode || '')}&`
-      + `redirect_uri=${encodeURIComponent(redirectUrl)}&`
-      + `client_id=${encodeURIComponent(clientId)}&`
-      + `code_verifier=${codeVerifier}`;
+    const body =
+      `grant_type=authorization_code&` +
+      `code=${encodeURIComponent(authorizationCode || "")}&` +
+      `redirect_uri=${encodeURIComponent(redirectUrl)}&` +
+      `client_id=${encodeURIComponent(clientId)}&` +
+      `code_verifier=${codeVerifier}`;
 
     return fetch(url, {
-      method: 'POST',
+      method: "POST",
       body,
       headers: {
-        'Content-Type': 'application/x-www-form-urlencoded'
-      }
-    })
-    .then(res => {
-      const jsonPromise = res.json()
-        .catch(_ => ({ error: 'invalid_json' }));
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+    }).then((res) => {
+      const jsonPromise = res.json().catch((_) => ({ error: "invalid_json" }));
 
       if (!res.ok) {
         return jsonPromise.then(({ error }: any) => {
           switch (error) {
-            case 'invalid_grant':
+            case "invalid_grant":
               onInvalidGrant(() => this.fetchAuthorizationCode());
               break;
             default:
@@ -556,7 +617,7 @@ export class OAuth2AuthCodePKCE {
           return Promise.reject(toErrorClass(error));
         });
       }
-      
+
       return jsonPromise.then((json) => {
         const { access_token, expires_in, refresh_token, scope } = json;
         const { explicitlyExposedTokens } = this.config;
@@ -567,13 +628,13 @@ export class OAuth2AuthCodePKCE {
 
         const accessToken: AccessToken = {
           value: access_token,
-          expiry: (new Date(Date.now() + (parseInt(expires_in) * 1000))).toString()
+          expiry: new Date(Date.now() + parseInt(expires_in) * 1000).toString(),
         };
         this.state.accessToken = accessToken;
 
-        if (refresh_token) {
+        if (refresh_token && this.state.rememberSession) {
           const refreshToken: RefreshToken = {
-            value: refresh_token
+            value: refresh_token,
           };
           this.state.refreshToken = refreshToken;
         }
@@ -581,8 +642,14 @@ export class OAuth2AuthCodePKCE {
         if (explicitlyExposedTokens) {
           tokensToExpose = Object.fromEntries(
             explicitlyExposedTokens
-              .map((tokenName: string): [string, string|undefined] => [tokenName, json[tokenName]])
-              .filter(([_, tokenValue]: [string, string|undefined]) => tokenValue !== undefined)
+              .map((tokenName: string): [string, string | undefined] => [
+                tokenName,
+                json[tokenName],
+              ])
+              .filter(
+                ([_, tokenValue]: [string, string | undefined]) =>
+                  tokenValue !== undefined
+              )
           );
           this.state.explicitlyExposedTokens = tokensToExpose;
         }
@@ -590,13 +657,17 @@ export class OAuth2AuthCodePKCE {
         if (scope) {
           // Multiple scopes are passed and delimited by spaces,
           // despite using the singular name "scope".
-          scopes = scope.split(' ');
+          scopes = scope.split(" ");
           this.state.scopes = scopes;
         }
 
-        localStorage.setItem(LOCALSTORAGE_STATE, JSON.stringify(this.state));
+        this.storage.setItem(STORAGE_STATE, JSON.stringify(this.state));
 
-        let accessContext: AccessContext = {token: accessToken, scopes};
+        let accessContext: AccessContext = {
+          token: accessToken,
+          scopes,
+          rememberSession: this.state.rememberSession,
+        };
         if (explicitlyExposedTokens) {
           accessContext.explicitlyExposedTokens = tokensToExpose;
         }
@@ -605,27 +676,47 @@ export class OAuth2AuthCodePKCE {
     });
   }
 
-
   private recoverState(): this {
-    this.state = JSON.parse(localStorage.getItem(LOCALSTORAGE_STATE) || '{}');
+    // local overrides session
+    const session = JSON.parse(sessionStorage.getItem(STORAGE_STATE) || "{}");
+    this.state = Object.assign(
+      session,
+      JSON.parse(localStorage.getItem(STORAGE_STATE) || "{}")
+    );
     return this;
   }
 
   private setState(state: State): this {
     this.state = state;
-    localStorage.setItem(LOCALSTORAGE_STATE, JSON.stringify(state));
+    this.storage.setItem(STORAGE_STATE, JSON.stringify(state));
     return this;
   }
 
+  public rememberSession(choice: boolean): this {
+    if (choice === this.state.rememberSession) return this;
+
+    this.state.rememberSession = choice;
+    if (choice) {
+      this.storage = window.localStorage;
+      this.setState(this.state);
+      window.sessionStorage.removeItem(STORAGE_STATE);
+    } else {
+      this.storage = window.sessionStorage;
+      this.setState(this.state);
+      window.localStorage.removeItem(STORAGE_STATE);
+    }
+
+    return this;
+  }
   /**
    * Implements *base64url-encode* (RFC 4648 § 5) without padding, which is NOT
    * the same as regular base64 encoding.
    */
   static base64urlEncode(value: string): string {
     let base64 = btoa(value);
-    base64 = base64.replace(/\+/g, '-');
-    base64 = base64.replace(/\//g, '_');
-    base64 = base64.replace(/=/g, '');
+    base64 = base64.replace(/\+/g, "-");
+    base64 = base64.replace(/\//g, "_");
+    base64 = base64.replace(/=/g, "");
     return base64;
   }
 
@@ -633,33 +724,35 @@ export class OAuth2AuthCodePKCE {
    * Extracts a query string parameter.
    */
   static extractParamFromUrl(url: URL, param: string): string {
-    let queryString = url.split('?');
+    let queryString = url.split("?");
     if (queryString.length < 2) {
-       return '';
+      return "";
     }
 
     // Account for hash URLs that SPAs usually use.
-    queryString = queryString[1].split('#');
+    queryString = queryString[1].split("#");
 
     const parts = queryString[0]
-      .split('&')
-      .reduce((a: string[], s: string) => a.concat(s.split('=')), []);
+      .split("&")
+      .reduce((a: string[], s: string) => a.concat(s.split("=")), []);
 
     if (parts.length < 2) {
-      return '';
+      return "";
     }
 
     const paramIdx = parts.indexOf(param);
-    return decodeURIComponent(paramIdx >= 0 ? parts[paramIdx + 1] : '');
+    return decodeURIComponent(paramIdx >= 0 ? parts[paramIdx + 1] : "");
   }
 
   /**
    * Converts the keys and values of an object to a url query string
    */
   static objectToQueryString(dict: ObjStringDict): string {
-    return Object.entries(dict).map(
-      ([key, val]: [string, string]) => `${key}=${encodeURIComponent(val)}`
-    ).join('&');
+    return Object.entries(dict)
+      .map(
+        ([key, val]: [string, string]) => `${key}=${encodeURIComponent(val)}`
+      )
+      .join("&");
   }
 
   /**
@@ -668,17 +761,17 @@ export class OAuth2AuthCodePKCE {
   static generatePKCECodes(): PromiseLike<PKCECodes> {
     const output = new Uint32Array(RECOMMENDED_CODE_VERIFIER_LENGTH);
     crypto.getRandomValues(output);
-    const codeVerifier = OAuth2AuthCodePKCE.base64urlEncode(Array
-      .from(output)
-      .map((num: number) => PKCE_CHARSET[num % PKCE_CHARSET.length])
-      .join(''));
+    const codeVerifier = OAuth2AuthCodePKCE.base64urlEncode(
+      Array.from(output)
+        .map((num: number) => PKCE_CHARSET[num % PKCE_CHARSET.length])
+        .join("")
+    );
 
-    return crypto
-      .subtle
-      .digest('SHA-256', (new TextEncoder()).encode(codeVerifier))
+    return crypto.subtle
+      .digest("SHA-256", new TextEncoder().encode(codeVerifier))
       .then((buffer: ArrayBuffer) => {
         let hash = new Uint8Array(buffer);
-        let binary = '';
+        let binary = "";
         let hashLength = hash.byteLength;
         for (let i: number = 0; i < hashLength; i++) {
           binary += String.fromCharCode(hash[i]);
@@ -695,9 +788,8 @@ export class OAuth2AuthCodePKCE {
   static generateRandomState(lengthOfState: number): string {
     const output = new Uint32Array(lengthOfState);
     crypto.getRandomValues(output);
-    return Array
-      .from(output)
+    return Array.from(output)
       .map((num: number) => PKCE_CHARSET[num % PKCE_CHARSET.length])
-      .join('');
+      .join("");
   }
 }
